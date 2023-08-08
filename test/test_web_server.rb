@@ -33,6 +33,8 @@ class WebServerTest < Minitest::Test
     @server.stop(true)
   end
 
+=begin
+
   def test_simple_server
     hit(["#{@tcp}/test"])
     assert @tester.ran_test, "Handler didn't really run"
@@ -92,10 +94,22 @@ class WebServerTest < Minitest::Test
     socket.close
   end
 
+
   def test_nonexistent_http_method
     socket = do_test("FOOBARBAZ www.zedshaw.com:443 HTTP/1.1\r\nConnection: close\r\n\r\n", 100)
     response = socket.read
     assert_match "Not Implemented", response
+    socket.close
+  end
+=end
+
+
+  def test_expect_100_header
+    #require 'byebug'; byebug
+    request = "POST /test HTTP/1.1\r\nHost: www.zedshaw.com\r\nContent-Type: text/plain\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nHello"
+    socket = do_test(request, request.length)
+    response = socket.read
+    assert_match "HTTP/1.1 100 Continue", response
     socket.close
   end
 

@@ -33,6 +33,17 @@ module Puma
 
     include Puma::Const
 
+=begin     def handle_all_requests(client, requests)
+      if !client.ignore_100_continue
+        body = client.body
+        client.body = nil
+        case handle_request(client, requests)
+        when 
+        end
+      end
+    end 
+=end
+
     # Takes the request contained in +client+, invokes the Rack application to construct
     # the response and writes it back to +client.io+.
     #
@@ -53,10 +64,10 @@ module Puma
       socket  = client.io   # io may be a MiniSSL::Socket
       app_body = nil
 
-
       return false if closed_socket?(socket)
 
       if client.http_content_length_limit_exceeded
+        ##require 'byebug'; byebug
         return prepare_response(413, {}, ["Payload Too Large"], requests, client)
       end
 
@@ -120,6 +131,24 @@ module Puma
 
           return :async
         end
+
+        pp "status before 100 check: #{status}"
+        if status == 100 #&& !client.ignore_100_continue
+          #client.ignore_100_continue = true
+          fast_write_str socket, HTTP_11_100
+          pp "sent 100 continue"
+          if @supported_http_methods == :any || @supported_http_methods.key?(env[REQUEST_METHOD])
+            status, headers, app_body = @thread_pool.with_force_shutdown do
+              pp "env: #{env["rack.input"]}"
+              @app.call(env)
+              pp "status: #{status}"
+            end
+          else
+            @log_writer.log "Unsupported HTTP method used: #{env[REQUEST_METHOD]}"
+            status, headers, app_body = [501, {}, ["#{env[REQUEST_METHOD]} method is not supported"]]
+          end
+        end 
+
       rescue ThreadPool::ForceShutdown => e
         @log_writer.unknown_error e, client, "Rack app"
         @log_writer.log "Detected force shutdown of a thread"
@@ -130,8 +159,10 @@ module Puma
 
         status, headers, res_body = lowlevel_error(e, env, 500)
       end
+      pp "prep_resp: #{status} "
       prepare_response(status, headers, res_body, requests, client)
     ensure
+      pp "io_buffer: #{io_buffer.string}"
       io_buffer.reset
       uncork_socket client.io
       app_body.close if app_body.respond_to? :close
@@ -155,6 +186,7 @@ module Puma
     # @param client [Puma::Client]
     # @return [Boolean,:async] keep-alive status or `:async`
     def prepare_response(status, headers, res_body, requests, client)
+      pp "PREP RESPONSE"
       env = client.env
       socket = client.io
       io_buffer = client.io_buffer
@@ -589,7 +621,6 @@ module Puma
           io_buffer << HTTP_11_200
         else
           io_buffer.append "#{HTTP_11} #{status} ", fetch_status_code(status), line_ending
-
           resp_info[:no_body] ||= status < 200 || STATUS_WITH_NO_ENTITY_BODY[status]
         end
       else

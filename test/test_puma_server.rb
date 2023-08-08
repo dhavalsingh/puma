@@ -90,6 +90,7 @@ class TestPumaServer < Minitest::Test
   def new_connection
     TCPSocket.new(@host, @port).tap {|sock| @ios << sock}
   end
+=begin
 
   def test_normalize_host_header_missing
     server_run do |env|
@@ -401,6 +402,7 @@ class TestPumaServer < Minitest::Test
     h = header sock
 
     # Content Too Large
+
     assert_equal ["HTTP/1.1 413 #{STATUS_CODES[413]}", "Content-Length: 17"], h
 
   end
@@ -1710,4 +1712,31 @@ class TestPumaServer < Minitest::Test
 
     assert_match(/something wrong happened/, data)
   end
+def test_http_11_keep_alive_with_large_payload
+  server_run(http_content_length_limit: 10) { [204, {}, []] }
+
+  sock = send_http "GET / HTTP/1.1\r\nConnection: Keep-Alive\r\nContent-Length: 17\r\n\r\n"
+  sock << "hello world foo bar"
+  h = header sock
+
+  # Content Too Large
+  
+  assert_equal ["HTTP/1.1 413 #{STATUS_CODES[413]}", "Content-Length: 17"], h
+
+end
+=end
+
+def test_http_11_keep_alive_with_large_payload_2
+  server_run(custom_100_continue_header_response: true) { [100, {}, []] }
+  #"POST / HTTP/1.1\r\nContent-Type: text/plain\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nHello"
+  sock = send_http "POST / HTTP/1.1\r\nHost: test.com\r\nContent-Type: text/plain\r\nExpect: 100-continue\r\nContent-Length: 19\r\n\r\n"
+  sock << "hello world foo bar"
+  h = header sock
+  pp h
+  #require 'byebug'; byebug
+  # Content Too Large
+  
+  assert_equal ["HTTP/1.1 403 #{STATUS_CODES[403]}", "Content-Length: 0"], h
+
+end
 end

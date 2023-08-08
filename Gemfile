@@ -39,3 +39,6 @@ end
 
 gem 'm'
 gem "localhost", require: false
+
+gem "byebug"
+gem 'pry'

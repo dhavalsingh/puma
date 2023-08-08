@@ -89,6 +89,9 @@ module Puma
       @http_content_length_limit = nil
       @http_content_length_limit_exceeded = false
 
+      @custom_100_continue_header_response = false
+      @ignore_100_continue = true
+
       @peerip = nil
       @peer_family = nil
       @listener = nil
@@ -104,9 +107,10 @@ module Puma
     end
 
     attr_reader :env, :to_io, :body, :io, :timeout_at, :ready, :hijacked,
-                :tempfile, :io_buffer, :http_content_length_limit_exceeded
+                :tempfile, :io_buffer, :http_content_length_limit_exceeded,
+                :custom_100_continue_header_response, :ignore_100_continue
 
-    attr_writer :peerip, :http_content_length_limit
+    attr_writer :peerip, :http_content_length_limit, :custom_100_continue_header_response, :ignore_100_continue
 
     attr_accessor :remote_addr_header, :listener
 
@@ -145,6 +149,7 @@ module Puma
     end
 
     def reset(fast_check=true)
+      pp "RESET"
       @parser.reset
       @io_buffer.reset
       @read_header = true
@@ -158,6 +163,7 @@ module Puma
       @peerip = nil if @remote_addr_header
       @in_last_chunk = false
       @http_content_length_limit_exceeded = false
+      @custom_100_continue_header_response = false
 
       if @buffer
         return false unless try_to_parse_proxy_protocol
@@ -217,6 +223,8 @@ module Puma
     end
 
     def try_to_finish
+      #require 'pry'; binding.pry
+      pp "TRY TO FINSIH"
       if env[CONTENT_LENGTH] && above_http_content_limit(env[CONTENT_LENGTH].to_i)
         @http_content_length_limit_exceeded = true
       end
@@ -227,8 +235,25 @@ module Puma
         set_ready
         return true
       end
+=begin       ##require 'byebug'; byebug
+      if env[HTTP_EXPECT] == CONTINUE
+        @http_expect_100_continue_header_present = true
+      end
 
-      return read_body if in_data_phase
+      if @http_expect_100_continue_header_present
+        ##require 'byebug'; byebug
+        @buffer = nil
+        
+        @body = EmptyBody
+        ##require 'byebug'; byebug
+        set_ready
+        @io << HTTP_11_100
+        @io.flush
+      end 
+=end
+      pp "in_data_phase: #{in_data_phase}"
+      pp "ignore_100_continue: #{@ignore_100_continue}"
+      return read_body if in_data_phase #|| !@ignore_100_continue)
 
       begin
         data = @io.read_nonblock(CHUNK_SIZE)
@@ -257,12 +282,17 @@ module Puma
 
       @parsed_bytes = @parser.execute(@env, @buffer, @parsed_bytes)
 
+      pp "Parser finished? #{@parser.finished?}"
+
       if @parser.finished? && above_http_content_limit(@parser.body.bytesize)
         @http_content_length_limit_exceeded = true
       end
 
       if @parser.finished?
-        return setup_body
+        #require 'byebug'; byebug
+        flag = setup_body
+        pp "setup_body Response: #{flag}"
+        return flag
       elsif @parsed_bytes >= MAX_HEADER
         raise HttpParserError,
           "HEADER is longer than allowed, aborting client early."
@@ -272,6 +302,7 @@ module Puma
     end
 
     def eagerly_finish
+      pp "eager finish: Ready? #{@ready} :: IO: #{@to_io.wait_readable(0)}"
       return true if @ready
       return false unless @to_io.wait_readable(0)
       try_to_finish
@@ -340,17 +371,13 @@ module Puma
 
     def setup_body
       @body_read_start = Process.clock_gettime(Process::CLOCK_MONOTONIC, :float_millisecond)
+      ##require 'byebug'; byebug
 
-      if @env[HTTP_EXPECT] == CONTINUE
-        # TODO allow a hook here to check the headers before
-        # going forward
-        @io << HTTP_11_100
-        @io.flush
-      end
-
+      #require 'byebug'; byebug
+      #require 'pry'; binding.pry
       @read_header = false
-
       body = @parser.body
+      pp "Body in setup_body: #{body}"
 
       te = @env[TRANSFER_ENCODING2]
       if te
@@ -393,6 +420,8 @@ module Puma
         return true
       end
 
+      pp "cl: #{cl}"
+      pp "body: #{body.bytesize}"
       remain = cl.to_i - body.bytesize
 
       if remain <= 0
@@ -416,11 +445,50 @@ module Puma
       @body.write body
 
       @body_remain = remain
+      #require 'byebug'; byebug
+      pp "body_remain: #{@body_remain}"
+
+      if @env[HTTP_EXPECT] == CONTINUE
+        if @custom_100_continue_header_response
+          @ignore_100_continue = false
+        else
+        # TODO allow a hook here to check the headers before
+        # going forward
+        # if request had Expects: 100-continue, delay writing 100 continue response 
+        # until backend has sent 100-continue response.
+        # For a non 100-continue response (like a 4xx to signal some client-side error
+        # (e.g. if the request entity length is beyond the configured limit) or a 3xx redirect) 
+        ########################
+        #   After having read a `Expect: 100-continue` header with the request we package up an `HttpRequest` instance and send
+        #   it through to the application. Only when (and if) the application then requests data from the entity stream do we
+        #   send out a `100 Continue` response and continue reading the request entity.
+        #   The application can therefore determine itself whether it wants the client to send the request entity
+        #   by deciding whether to look at the request entity data stream or not.
+        #   If the application sends a response *without* having looked at the request entity the client receives this
+        #   response *instead of* the `100 Continue` response and the server closes the connection afterwards.
+        #require 'byebug'; byebug
+        #require 'pry'; binding.pry
+        pp "buffer #{@buffer}"
+        @ignore_100_continue = false
+        #@buffer = nil
+        #@body = StringIO.new
+        #@read_header = false
+        set_ready
+        pp "Remaining body: #{@body_remain}"
+        return true
+        #@io << HTTP_11_100
+        #@io.flush
+        end
+      end
+
+      pp "Remaining body2: #{@body_remain}"
 
       false
     end
 
     def read_body
+      pp "read_body"
+      pp "body: #{@body_remain}"
       if @chunked_body
         return read_chunked_body
       end
@@ -436,6 +504,7 @@ module Puma
       end
 
       begin
+        pp "Readaing"
         chunk = @io.read_nonblock(want, @read_buffer)
       rescue IO::WaitReadable
         return false
@@ -445,12 +514,14 @@ module Puma
 
       # No chunk means a closed socket
       unless chunk
+        pp "close"
         @body.close
         @buffer = nil
         set_ready
         raise EOFError
       end
-
+      pp "XX"
+      require 'byebug'; byebug
       remain -= @body.write(chunk)
 
       if remain <= 0

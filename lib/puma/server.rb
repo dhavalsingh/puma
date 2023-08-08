@@ -96,6 +96,7 @@ module Puma
       @max_fast_inline     = @options[:max_fast_inline]
       @io_selector_backend = @options[:io_selector_backend]
       @http_content_length_limit = @options[:http_content_length_limit]
+      @custom_100_continue_header_response = @options[:custom_100_continue_header_response]
 
       # make this a hash, since we prefer `key?` over `include?`
       @supported_http_methods =
@@ -294,6 +295,8 @@ module Puma
     # (return `false`). When the client sends more data to the socket the `Puma::Client` object
     # will wake up and again be checked to see if it's ready to be passed to the thread pool.
     def reactor_wakeup(client)
+      #require 'byebug'; byebug
+      pp "Reactor wakeup"
       shutdown = !@queue_requests
       if client.try_to_finish || (shutdown && !client.can_close?)
         @thread_pool << client
@@ -348,6 +351,7 @@ module Puma
                 pool << Client.new(io, @binder.env(sock)).tap { |c|
                   c.listener = sock
                   c.http_content_length_limit = @http_content_length_limit
+                  c.custom_100_continue_header_response = @custom_100_continue_header_response
                   c.send(addr_send_name, addr_value) if addr_value
                 }
               end
@@ -415,29 +419,32 @@ module Puma
     #
     # Return true if one or more requests were processed.
     def process_client(client)
+      #require 'byebug'; byebug
       # Advertise this server into the thread
+      pp "Process client"
       Thread.current[THREAD_LOCAL_KEY] = self
 
       clean_thread_locals = @options[:clean_thread_locals]
       close_socket = true
 
       requests = 0
-
+      pp "QUEUE REQ: #{@queue_requests}"
       begin
         if @queue_requests &&
           !client.eagerly_finish
 
           client.set_timeout(@first_data_timeout)
           if @reactor.add client
+            pp "Adding client to reactor"
             close_socket = false
             return false
           end
         end
-
+        pp "HEYYY"
         with_force_shutdown(client) do
           client.finish(@first_data_timeout)
         end
-
+        pp "HANDLE REQ STARTS"
         while true
           @requests_count += 1
           case handle_request(client, requests + 1)
@@ -461,6 +468,7 @@ module Puma
               @thread_pool.backlog > 0
 
             next_request_ready = with_force_shutdown(client) do
+              pp "rest call here"
               client.reset(fast_check)
             end
 
